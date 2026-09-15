@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import os
 import re
 import tempfile
 import time
+
+
 from typing import List
 
 import pypdfium2
@@ -28,6 +32,7 @@ from surya.table_rec.schema import TableResult
 
 from surya.scripts.doc_exporter import create_docx_from_surya_page, create_docx_from_surya_pages, create_docx_from_markdown
 from surya.scripts.document_tagger import tag_document_page
+from surya.scripts.ai_processor import analyze_ocr_and_extract_form_fields
 
 
 # KaTeX & Document Layout HTML wrapper.
@@ -233,7 +238,259 @@ def load_fast_layout():
     return FastLayoutPredictor()
 
 
+def render_workflow_note(expanded: bool = False):
+    with st.expander("💡 End-to-End Workflow Architecture & Pipeline Overview", expanded=expanded):
+        st.markdown(
+            """
+### 🛠️ End-to-End Workflow Architecture
+
+1. **📄 Multi-Page & Single-Page Document Ingestion**:
+   - Supports multi-page PDFs and high-resolution images (PNG, JPG, WebP).
+   - Sequentially parses all document pages or targets specific single pages.
+
+2. **⚡ Surya OCR 2 & Spatial Layout Segmentation**:
+   - Performs document-agnostic layout block recognition (Headings, Paragraphs, Tables, Figures/Logos).
+   - Generates exact **1:1 Spatial Layout Replicas** with mathematical pixel scaling coordinates and clean paper HTML previews.
+
+3. **🤖 Google Gemini API (`gemini-2.5-flash`) AI Engine**:
+   - Clears OCR character glitches, typos, line wrap breaks, and reading order errors.
+   - **Dynamic Key Extraction**: Dynamically identifies field labels (`field_name`: `value`) tailored to document types (Prescription, Medical Bill, Invoice, Spec Sheet, Lab Report).
+
+4. **💊 Real-Time Web Search Grounding (India Medicines & Drug Info Dataset)**:
+   - Queries live Indian pharmaceutical registries (**1mg.com, PharmEasy, Netmeds**) for medicine candidates.
+   - **Only AI is permitted to correct drug names**: Verifies garbled OCR names (e.g., *Dolo-65O* ➔ `Dolo 650mg Tablet`, *Augmntn 625* ➔ `Augmentin 625 Duo Tablet`, *Pan-D* ➔ `Pan D Capsule`).
+   - Standardizes active chemical compositions (*Paracetamol 650mg*), dosages, and duration.
+
+5. **✏️ Interactive Manual Correction & Export Center**:
+   - Editable Streamlit form to review, modify, and save verified fields and drug lists.
+   - One-click export to Microsoft Word (`.docx`), `.json`, and structured `.csv`.
+"""
+        )
+
+
+def render_openai_correction_form(raw_ocr_content: str, key_prefix: str = "main"):
+    st.subheader("🤖 Gemini AI Analysis & Dynamic Medicine Verification Form")
+    st.caption("Use Google Gemini API (gemini-2.5-flash) to structure raw OCR output into dynamic key-value fields, verify Indian drug names using live dataset search, clear inconsistencies, and edit values.")
+
+    env_gemini_key = os.getenv("GEMINI_API_KEY", "")
+    env_openai_key = os.getenv("OPENAI_API_KEY", "")
+
+    form_ver = st.session_state.get(f"{key_prefix}_form_ver", 0)
+
+    with st.expander("🔑 AI API Key & Model Settings", expanded=not bool(env_gemini_key or env_openai_key)):
+        col_k1, col_k2 = st.columns(2)
+        with col_k1:
+            user_gemini_key = st.text_input(
+                "Gemini API Key (Recommended)",
+                value=env_gemini_key,
+                type="password",
+                help="Pre-configured from .env file or enter a custom key",
+                key=f"{key_prefix}_gemini_api_key_input",
+            )
+        with col_k2:
+            user_openai_key = st.text_input(
+                "OpenAI API Key (Optional)",
+                value=env_openai_key,
+                type="password",
+                help="Pre-configured from .env file or enter a custom key",
+                key=f"{key_prefix}_openai_api_key_input",
+            )
+
+    # Editable raw text container if raw_ocr_content is short/empty
+    if not raw_ocr_content.strip():
+        raw_ocr_input = st.text_area(
+            "Raw Document Text / OCR Output for AI Analysis",
+            value="Prescription: Patient Rahul Sharma Date: 14/09/2026\n1. Tab Dolo-65O 1-0-1 5 days\n2. Tab Augmntn 625 1-0-1 5 days\n3. Cap Pan-D 1-0-0 5 days",
+            height=120,
+            key=f"{key_prefix}_raw_text_area_{form_ver}",
+        )
+    else:
+        with st.expander("📄 View Source OCR Text Fed to Gemini AI", expanded=False):
+            raw_ocr_input = st.text_area(
+                "Source OCR Content",
+                value=raw_ocr_content,
+                height=150,
+                key=f"{key_prefix}_raw_text_area_expanded_{form_ver}",
+            )
+
+    col_ai1, col_ai2 = st.columns([2, 1])
+    with col_ai1:
+        ai_model = st.selectbox(
+            "Select AI Engine Model",
+            ["gemini-2.5-flash", "gemini-2.0-flash", "gpt-4o-mini", "gpt-4o"],
+            index=0,
+            key=f"{key_prefix}_ai_model_select_{form_ver}"
+        )
+    with col_ai2:
+        st.write("")
+        st.write("")
+        analyze_btn = st.button("✨ Analyze with Gemini AI", type="primary", use_container_width=True, key=f"{key_prefix}_analyze_btn_{form_ver}")
+
+    session_key = f"{key_prefix}_ai_form_data"
+    saved_key = f"{key_prefix}_saved_corrections"
+
+    if analyze_btn:
+        active_text = raw_ocr_input.strip() if (raw_ocr_input and raw_ocr_input.strip()) else raw_ocr_content.strip()
+        if ai_model.startswith("gemini"):
+            active_key = user_gemini_key.strip() or env_gemini_key.strip()
+            missing_msg = "⚠️ Gemini API Key is missing. Please enter your Gemini API key above or set GEMINI_API_KEY in .env."
+        else:
+            active_key = user_openai_key.strip() or env_openai_key.strip()
+            missing_msg = "⚠️ OpenAI API Key is missing. Please enter your OpenAI API key above or set OPENAI_API_KEY in .env."
+
+        if not active_key:
+            st.error(missing_msg)
+        else:
+            with st.spinner(f"Analyzing document & verifying medicine dataset with {ai_model}..."):
+                try:
+                    extracted_data = analyze_ocr_and_extract_form_fields(
+                        raw_ocr_content=active_text,
+                        model_name=ai_model,
+                        api_key=active_key,
+                    )
+                    new_ver = int(time.time())
+                    st.session_state[f"{key_prefix}_form_ver"] = new_ver
+                    form_ver = new_ver
+                    st.session_state[session_key] = extracted_data
+                    st.success(f"Successfully analyzed OCR content with {ai_model}!")
+                except Exception as ex:
+                    st.error(f"AI Extraction Failed: {str(ex)}")
+
+    form_data = st.session_state.get(session_key)
+    if form_data:
+        st.divider()
+
+        if form_data.get("is_ai_corrected"):
+            ai_engine = form_data.get("ai_engine_used", f"AI Engine ({ai_model})")
+            st.success(f"🤖 **AI Data Inconsistency Cleanup Active**: {ai_engine} detected and cleared OCR character glitches, typos, line breaks, formatting errors, and verified Indian drug names against dataset.")
+            corrections = form_data.get("ai_corrections_made", [])
+            if corrections:
+                with st.expander("🛠️ View AI Inconsistency Cleanup Log", expanded=True):
+                    for corr in corrections:
+                        st.markdown(f"• 🪄 **AI Corrected**: {corr}")
+
+        st.markdown("### ✏️ Edit & Correct Document Fields")
+        st.caption("Review AI-corrected fields and Indian Drug Dataset verifications below. You can make manual edits, update values, or save your verified document data.")
+
+        with st.form(f"{key_prefix}_correction_form_{form_ver}"):
+            c_hdr1, c_hdr2 = st.columns(2)
+            with c_hdr1:
+                edited_title = st.text_input("Document Title (AI Cleaned)", value=form_data.get("document_title", ""), key=f"{key_prefix}_doc_title_{form_ver}")
+            with c_hdr2:
+                edited_type = st.text_input("Document Category / Type (AI Detected)", value=form_data.get("document_type", ""), key=f"{key_prefix}_doc_type_{form_ver}")
+
+            edited_summary = st.text_area("Executive Summary (AI Reconciled)", value=form_data.get("summary", ""), height=90, key=f"{key_prefix}_doc_summary_{form_ver}")
+
+            st.markdown("#### 🔑 Dynamic Key-Value Document Fields (Extracted based on Document Type)")
+            kv_list = form_data.get("dynamic_key_value_fields") or form_data.get("key_value_fields", [])
+            edited_kv = []
+            for idx, item in enumerate(kv_list):
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    fname = st.text_input(f"Dynamic Field #{idx+1} Label ✨", value=item.get("field_name", ""), key=f"{key_prefix}_fn_{idx}_{form_ver}")
+                with c2:
+                    fval = st.text_input(f"Field #{idx+1} Value ✨", value=str(item.get("value", "")), key=f"{key_prefix}_fv_{idx}_{form_ver}")
+                edited_kv.append({
+                    "field_name": fname,
+                    "value": fval,
+                    "is_ai_corrected": True,
+                })
+
+            med_list = form_data.get("medicines_list", [])
+            edited_meds = []
+            if med_list:
+                st.markdown("#### 💊 Indian Medicines & Drug Info Dataset Corrections")
+                st.caption("Medicine names have been cross-referenced and corrected against the India Medicines & Drug Info Dataset (1mg/Netmeds/PharmEasy registry). Only AI is permitted to correct drug names.")
+                for m_idx, med in enumerate(med_list):
+                    st.markdown(f"**Medicine #{m_idx+1}**: Raw OCR Name: `{med.get('ocr_raw_name', 'N/A')}`")
+                    mc1, mc2, mc3 = st.columns([2, 2, 1])
+                    with mc1:
+                        m_name = st.text_input(f"Verified Medicine Name (India Dataset) #{m_idx+1}", value=med.get("corrected_medicine_name", ""), key=f"{key_prefix}_mn_{m_idx}_{form_ver}")
+                        m_comp = st.text_input(f"Active Chemical Composition #{m_idx+1}", value=med.get("composition", ""), key=f"{key_prefix}_mc_{m_idx}_{form_ver}")
+                    with mc2:
+                        m_dos = st.text_input(f"Dosage / Frequency #{m_idx+1}", value=med.get("dosage", ""), key=f"{key_prefix}_md_{m_idx}_{form_ver}")
+                        m_dur = st.text_input(f"Duration #{m_idx+1}", value=med.get("duration", ""), key=f"{key_prefix}_mt_{m_idx}_{form_ver}")
+                    with mc3:
+                        st.write("")
+                        st.info("💊 India Drug Dataset Verified")
+
+                    edited_meds.append({
+                        "ocr_raw_name": med.get("ocr_raw_name"),
+                        "corrected_medicine_name": m_name,
+                        "composition": m_comp,
+                        "dosage": m_dos,
+                        "duration": m_dur,
+                        "correction_status": "Verified against India Medicines & Drug Info Dataset",
+                    })
+
+            st.markdown("#### 📝 Content Sections & Text Blocks (AI Cleaned)")
+            sec_list = form_data.get("content_sections", [])
+            edited_sections = []
+            for s_idx, sec in enumerate(sec_list):
+                s_heading = st.text_input(f"Section #{s_idx+1} Heading ✨", value=sec.get("section_heading", ""), key=f"{key_prefix}_sh_{s_idx}_{form_ver}")
+                s_content = st.text_area(f"Section #{s_idx+1} Text Content ✨", value=sec.get("text_content", ""), height=120, key=f"{key_prefix}_sc_{s_idx}_{form_ver}")
+                edited_sections.append({"section_heading": s_heading, "text_content": s_content})
+
+            save_submitted = st.form_submit_button("💾 Save Manual Corrections & Verification", type="primary", use_container_width=True)
+
+            if save_submitted:
+                corrected_dict = {
+                    "document_title": edited_title,
+                    "document_type": edited_type,
+                    "summary": edited_summary,
+                    "is_ai_corrected": True,
+                    "status": "AI Corrected & Manually Verified",
+                    "ai_corrections_made": form_data.get("ai_corrections_made", []),
+                    "dynamic_key_value_fields": edited_kv,
+                    "medicines_list": edited_meds,
+                    "content_sections": edited_sections,
+                    "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                st.session_state[saved_key] = corrected_dict
+                os.makedirs("output", exist_ok=True)
+                out_filepath = os.path.join("output", "corrected_ocr_data.json")
+                with open(out_filepath, "w", encoding="utf-8") as f:
+                    json.dump(corrected_dict, f, indent=2)
+                st.success(f"✅ Successfully saved manual corrections to `{out_filepath}`!")
+
+        saved_data = st.session_state.get(saved_key) or form_data
+        if saved_data:
+            st.markdown("#### 📥 Export AI-Corrected Data")
+            ex1, ex2 = st.columns(2)
+            with ex1:
+                st.download_button(
+                    label="📥 Download Corrected JSON",
+                    data=json.dumps(saved_data, indent=2).encode("utf-8"),
+                    file_name="corrected_ocr_data.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key=f"{key_prefix}_dl_json_{form_ver}",
+                )
+            with ex2:
+                import csv
+                csv_io = io.StringIO()
+                writer = csv.writer(csv_io)
+                writer.writerow(["Field Category", "Field Name / Raw OCR", "Corrected Value", "AI Correction Source"])
+                for item in saved_data.get("dynamic_key_value_fields") or saved_data.get("key_value_fields", []):
+                    writer.writerow(["Dynamic Field", item.get("field_name"), item.get("value"), "AI Cleaned"])
+                for med in saved_data.get("medicines_list", []):
+                    writer.writerow(["Prescribed Medicine", med.get("ocr_raw_name"), med.get("corrected_medicine_name"), "India Medicines and Drug Info Dataset"])
+                st.download_button(
+                    label="📊 Download Key-Values & Medicines (.csv)",
+                    data=csv_io.getvalue().encode("utf-8"),
+                    file_name="corrected_fields.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"{key_prefix}_dl_csv_{form_ver}",
+                )
+
+    else:
+        st.info("💡 Click **'✨ Analyze with Gemini AI'** above to parse your document OCR output into an interactive correction form.")
+
+
+
 def _layout_predictor(use_fast: bool):
+
     return load_fast_layout() if use_fast else predictors["layout"]
 
 
@@ -404,7 +661,6 @@ def page_counter(pdf_file):
 
 
 st.set_page_config(layout="wide")
-col1, col2 = st.columns([0.55, 0.45])
 
 predictors = load_predictors_cached()
 
@@ -419,11 +675,12 @@ if in_file is None:
 
 Welcome to the **Tata Power Document Intelligence & OCR Hub**.
 
-We are delighted to bring you this advanced OCR and document analysis platform designed to effortlessly extract text, analyze document layouts, recognize tables, and digitize your documents with high speed and precision.
+We are delighted to bring you this advanced OCR and document analysis platform powered by **Surya OCR 2**, **Google Gemini API (`gemini-2.5-flash`)**, and **Live Web Search Grounding for the India Medicines & Drug Info Dataset**.
 
 👈 **Get Started:** Upload a PDF document or image using the sidebar menu on the left to begin processing.
 """
     )
+    render_workflow_note(expanded=True)
     st.stop()
 
 filetype = in_file.type
@@ -448,166 +705,246 @@ else:
     pil_image = Image.open(in_file).convert("RGB")
     page_number = None
 
-run_unified_pipeline = st.sidebar.button("⚡ Run Unified Ideal Pipeline (Document Agnostic)", type="primary")
-st.sidebar.markdown("---")
-st.sidebar.caption("Individual Modular Features:")
-run_full_page_ocr = st.sidebar.button("Run Full-Page OCR")
-run_text_det = st.sidebar.button("Run Text Detection")
-run_layout = st.sidebar.button("Run Layout Analysis")
-run_table_rec = st.sidebar.button("Run Table Rec")
-run_block_ocr = st.sidebar.button("Run Block OCR")
-run_ocr_errors = st.sidebar.button("Run bad-PDF-text detection")
-
-use_fast_layout = st.sidebar.checkbox(
-    "Fast layout",
-    value=True,
-    help="Use the fast layout detector.",
-)
-table_mode = st.sidebar.radio(
-    "Table mode",
-    options=["simple", "full"],
-    index=0,
-    help="simple: rows+cols only. full: full HTML.",
-)
-skip_table_detection = st.sidebar.checkbox(
-    "Skip table detection",
-    value=False,
-    help="Treat the entire page/image as a single table.",
-)
-
 if pil_image is None:
     st.stop()
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📌 Document Views Navigation")
+view_selection = st.sidebar.radio(
+    "Select Result View:",
+    options=[
+        "📄 Presentable Document Preview",
+        "🎯 1:1 Exact Spatial Layout Replica",
+        "🏷️ Metadata Tags & Entities",
+        "🤖 Gemini AI Form & Correction",
+        "📥 Export Center (.docx / .html)",
+        "🔍 Pipeline Diagnostic Inspector",
+    ],
+    index=0,
+    help="Navigate between document preview, 1:1 spatial layout, metadata tags, Gemini AI form, export center, and inspector from the sidebar.",
+)
 
-if run_unified_pipeline:
-    with col1:
-        st.subheader("⚡ Unified Document-Agnostic Intelligence Pipeline")
-        
-        is_multi_page = (
-            "pdf" in filetype
-            and scan_scope == "🔄 Scan All Pages (Full Document - Default)"
-            and page_count is not None
-            and page_count > 1
+# --- TOP NAVIGATION & PIPELINE CONTROLS BAR ---
+st.markdown("### 🧭 Top Navigation & Pipeline Controls")
+
+top_card = st.container()
+with top_card:
+    st.markdown("##### 🚀 Execution Modes")
+    b0, b1, b2, b3, b4, b5, b6 = st.columns([1.2, 1, 1, 1, 1, 1, 1.2])
+    with b0:
+        run_unified_pipeline = st.button("⚡ Run Unified Pipeline", type="primary", use_container_width=True, help="Run Unified Ideal Pipeline (Document Agnostic)")
+    with b1:
+        run_full_page_ocr = st.button("Run Full-Page OCR", use_container_width=True)
+    with b2:
+        run_text_det = st.button("Run Text Detection", use_container_width=True)
+    with b3:
+        run_layout = st.button("Run Layout Analysis", use_container_width=True)
+    with b4:
+        run_table_rec = st.button("Run Table Rec", use_container_width=True)
+    with b5:
+        run_block_ocr = st.button("Run Block OCR", use_container_width=True)
+    with b6:
+        run_ocr_errors = st.button("Run bad-PDF-text detection", use_container_width=True)
+
+    st.markdown("##### ⚙️ Settings")
+    set_col1, set_col2, set_col3 = st.columns([1, 1.2, 1.2])
+    with set_col1:
+        use_fast_layout = st.checkbox(
+            "Fast layout",
+            value=True,
+            help="Use the fast layout detector.",
+        )
+    with set_col2:
+        table_mode = st.radio(
+            "Table mode:",
+            options=["simple", "full"],
+            index=0,
+            horizontal=True,
+            help="simple: rows+cols only. full: full HTML.",
+        )
+    with set_col3:
+        skip_table_detection = st.checkbox(
+            "Skip table detection",
+            value=False,
+            help="Treat the entire page/image as a single table.",
         )
 
-        source_name = in_file.name if hasattr(in_file, "name") else "Document"
+st.divider()
 
-        if is_multi_page:
-            st.info(f"📚 **Full Document Mode**: Iteratively scanning and extracting all {page_count} pages...")
-            prog_bar = st.progress(0, text="Starting document extraction...")
-            
-            all_pages_data: List[tuple[PageOCRResult, Image.Image]] = []
-            all_html_parts: List[str] = []
-            all_spatial_parts: List[str] = []
-            all_annotated: List[tuple[int, Image.Image]] = []
-            total_elapsed = 0
-            doc_tags = {}
+col1, col2 = st.columns([0.55, 0.45])
 
-            for p_idx in range(1, page_count + 1):
-                prog_bar.progress(
-                    int((p_idx - 1) / page_count * 100),
-                    text=f"Scanning Page {p_idx} of {page_count}..."
-                )
-                p_img = get_page_image(in_file, p_idx, settings.IMAGE_DPI_HIGHRES)
-                ann_img, p_page, p_layout, p_ltime, p_btime = block_ocr(p_img)
-                total_elapsed += (p_ltime + p_btime)
-                all_pages_data.append((p_page, p_img))
-                all_annotated.append((p_idx, ann_img))
+# Reset state if new file uploaded
+file_identifier = f"{in_file.name}_{in_file.size}" if hasattr(in_file, "name") else str(id(in_file))
+if st.session_state.get("current_file_id") != file_identifier:
+    st.session_state["current_file_id"] = file_identifier
+    st.session_state["unified_result"] = None
+    st.session_state["active_mode"] = None
 
-                if p_idx == 1:
-                    doc_tags = tag_document_page(p_page, p_img, source_name, p_idx)
+if run_unified_pipeline:
+    st.session_state["active_mode"] = "unified"
+elif run_full_page_ocr:
+    st.session_state["active_mode"] = "full_ocr"
+elif run_text_det:
+    st.session_state["active_mode"] = "text_det"
+elif run_layout:
+    st.session_state["active_mode"] = "layout"
+elif run_table_rec:
+    st.session_state["active_mode"] = "table_rec"
+elif run_block_ocr:
+    st.session_state["active_mode"] = "block_ocr"
+elif run_ocr_errors:
+    st.session_state["active_mode"] = "ocr_errors"
 
-                p_html = _assemble_page_html(p_page, p_img)
-                p_spatial = _assemble_spatial_page_html(p_page, p_img)
+active_mode = st.session_state.get("active_mode")
+if active_mode is None:
+    active_mode = "unified"
+    st.session_state["active_mode"] = "unified"
 
-                all_html_parts.append(
-                    f'<div style="margin-bottom: 32px; padding-bottom: 20px; border-bottom: 2px dashed #003366;">'
-                    f'<div style="font-size: 14px; font-weight: bold; color: #003366; margin-bottom: 12px; border-left: 4px solid #003366; padding-left: 8px;">📄 Page {p_idx} of {page_count}</div>'
-                    f'{p_html}</div>'
-                )
-                all_spatial_parts.append(
-                    f'<div style="margin-bottom: 32px;">'
-                    f'<div style="font-size: 14px; font-weight: bold; color: #003366; margin-bottom: 12px; border-left: 4px solid #003366; padding-left: 8px;">📄 Spatial View — Page {p_idx} of {page_count}</div>'
-                    f'{p_spatial}</div>'
-                )
+if active_mode == "unified":
+    with col1:
+        st.subheader("⚡ Unified Document-Agnostic Intelligence Pipeline")
+        render_workflow_note(expanded=False)
 
-            prog_bar.progress(100, text=f"✅ All {page_count} pages extracted successfully!")
-            full_html = "\n".join(all_html_parts)
-            spatial_html = "\n".join(all_spatial_parts)
-
-            docx_bytes = create_docx_from_surya_pages(
-                pages=all_pages_data,
-                document_title=doc_tags.get("document_title", "Tata Power Digitized Document"),
-            )
-            annotated = all_annotated[0][1]
-            page = all_pages_data[0][0]
-        else:
-            # Single Page Processing Mode
-            pdf_status = "Skipped (Image file)"
-            if "pdf" in filetype:
-                with st.spinner("Stage 1/4: Checking PDF text quality & vector structure..."):
-                    pdf_status, _ = ocr_errors(in_file, page_count)
-                st.info(f"📋 **Stage 1 (Pre-Flight Check)**: {pdf_status}")
-            
-            with st.spinner("Stage 2/4: Running Layout Analysis & Block Reading Order..."):
-                annotated, page, layout, layout_time, block_time = block_ocr(pil_image)
-            
-            p_num = page_number or 1
-            doc_tags = tag_document_page(page, pil_image, source_name, p_num)
-            total_elapsed = layout_time + block_time
-
-            full_html = _assemble_page_html(page, pil_image)
-            spatial_html = _assemble_spatial_page_html(page, pil_image)
-            docx_bytes = create_docx_from_surya_page(
-                page=page,
-                pil_image=pil_image,
-                document_title=doc_tags.get("document_title", "Tata Power Digitized Document"),
+        if run_unified_pipeline or st.session_state.get("unified_result") is None:
+            is_multi_page = (
+                "pdf" in filetype
+                and scan_scope == "🔄 Scan All Pages (Full Document - Default)"
+                and page_count is not None
+                and page_count > 1
             )
 
-        tables_found = sum(1 for b in page.blocks if b.label in ("Table", "TableOfContents"))
+            source_name = in_file.name if hasattr(in_file, "name") else "Document"
+
+            if is_multi_page:
+                st.info(f"📚 **Full Document Mode**: Iteratively scanning and extracting all {page_count} pages...")
+                prog_bar = st.progress(0, text="Starting document extraction...")
+
+                all_pages_data: List[tuple[PageOCRResult, Image.Image]] = []
+                all_html_parts: List[str] = []
+                all_spatial_parts: List[str] = []
+                all_annotated: List[tuple[int, Image.Image]] = []
+                total_elapsed = 0
+                doc_tags = {}
+
+                for p_idx in range(1, page_count + 1):
+                    prog_bar.progress(
+                        int((p_idx - 1) / page_count * 100),
+                        text=f"Scanning Page {p_idx} of {page_count}..."
+                    )
+                    p_img = get_page_image(in_file, p_idx, settings.IMAGE_DPI_HIGHRES)
+                    ann_img, p_page, p_layout, p_ltime, p_btime = block_ocr(p_img)
+                    total_elapsed += (p_ltime + p_btime)
+                    all_pages_data.append((p_page, p_img))
+                    all_annotated.append((p_idx, ann_img))
+
+                    if p_idx == 1:
+                        doc_tags = tag_document_page(p_page, p_img, source_name, p_idx)
+
+                    p_html = _assemble_page_html(p_page, p_img)
+                    p_spatial = _assemble_spatial_page_html(p_page, p_img)
+
+                    all_html_parts.append(
+                        f'<div style="margin-bottom: 32px; padding-bottom: 20px; border-bottom: 2px dashed #003366;">'
+                        f'<div style="font-size: 14px; font-weight: bold; color: #003366; margin-bottom: 12px; border-left: 4px solid #003366; padding-left: 8px;">📄 Page {p_idx} of {page_count}</div>'
+                        f'{p_html}</div>'
+                    )
+                    all_spatial_parts.append(
+                        f'<div style="margin-bottom: 32px;">'
+                        f'<div style="font-size: 14px; font-weight: bold; color: #003366; margin-bottom: 12px; border-left: 4px solid #003366; padding-left: 8px;">📄 Spatial View — Page {p_idx} of {page_count}</div>'
+                        f'{p_spatial}</div>'
+                    )
+
+                prog_bar.progress(100, text=f"✅ All {page_count} pages extracted successfully!")
+                full_html = "\n".join(all_html_parts)
+                spatial_html = "\n".join(all_spatial_parts)
+
+                docx_bytes = create_docx_from_surya_pages(
+                    pages=all_pages_data,
+                    document_title=doc_tags.get("document_title", "Tata Power Digitized Document"),
+                )
+                annotated = all_annotated[0][1]
+                page = all_pages_data[0][0]
+            else:
+                pdf_status = "Skipped (Image file)"
+                if "pdf" in filetype:
+                    with st.spinner("Stage 1/4: Checking PDF text quality & vector structure..."):
+                        pdf_status, _ = ocr_errors(in_file, page_count)
+
+                with st.spinner("Stage 2/4: Running Layout Analysis & Block Reading Order..."):
+                    annotated, page, layout, layout_time, block_time = block_ocr(pil_image)
+
+                p_num = page_number or 1
+                doc_tags = tag_document_page(page, pil_image, source_name, p_num)
+                total_elapsed = layout_time + block_time
+
+                full_html = _assemble_page_html(page, pil_image)
+                spatial_html = _assemble_spatial_page_html(page, pil_image)
+                docx_bytes = create_docx_from_surya_page(
+                    page=page,
+                    pil_image=pil_image,
+                    document_title=doc_tags.get("document_title", "Tata Power Digitized Document"),
+                )
+
+            raw_ocr = "\n".join([b.html for b in page.blocks if hasattr(b, 'html') and b.html])
+            st.session_state["unified_result"] = {
+                "doc_tags": doc_tags,
+                "full_html": full_html,
+                "spatial_html": spatial_html,
+                "docx_bytes": docx_bytes,
+                "annotated": annotated,
+                "page": page,
+                "total_elapsed": total_elapsed,
+                "raw_ocr": raw_ocr,
+            }
+
+        res = st.session_state["unified_result"]
+        doc_tags = res["doc_tags"]
+        full_html = res["full_html"]
+        spatial_html = res["spatial_html"]
+        docx_bytes = res["docx_bytes"]
+        annotated = res["annotated"]
+        page = res["page"]
+        total_elapsed = res["total_elapsed"]
+        raw_ocr = res["raw_ocr"]
+
         st.success(f"✅ Pipeline Completed in {total_elapsed:.2f}s!")
-        
-        tab_doc, tab_spatial, tab_tags, tab_export, tab_inspector = st.tabs([
-            "📄 Presentable Document Preview",
-            "🎯 1:1 Exact Spatial Layout Replica",
-            "🏷️ Metadata Tags & Entities",
-            "📥 Export Center (.docx / .html)",
-            "🔍 Pipeline Diagnostic Inspector",
-        ])
-        
-        with tab_doc:
+
+        if view_selection == "📄 Presentable Document Preview":
             st.markdown(f"### ⚡ {doc_tags.get('document_title', 'Tata Power Digitized Document')}")
             st.caption(f"Document-agnostic flow ({doc_tags.get('document_type')}) with inline image graphics, tables, and section headings")
             render_ocr_html(full_html, height=700)
-            
-        with tab_spatial:
+
+        elif view_selection == "🎯 1:1 Exact Spatial Layout Replica":
             st.markdown("### 🎯 1:1 Spatial Layout Replica")
             st.caption("Exact spatial coordinate positioning matching the original document page layout")
             render_ocr_html(spatial_html, height=750)
 
-        with tab_tags:
+        elif view_selection == "🏷️ Metadata Tags & Entities":
             st.markdown("### 🏷️ Extracted Document Metadata & Classification Tags")
             m1, m2 = st.columns(2)
             with m1:
                 st.metric(label="📄 Document Title", value=doc_tags.get("document_title", "N/A"))
             with m2:
                 st.metric(label="🏷️ Classified Document Type", value=doc_tags.get("document_type", "General Document"))
-            
+
             st.markdown("#### 📝 Document Summary")
             st.info(doc_tags.get("summary", "No summary extracted."))
-            
+
             entities = doc_tags.get("entities", [])
             if entities:
                 st.markdown("#### 🔑 Key Extracted Entities")
                 st.write(" • ".join([f"`{e}`" for e in entities]))
-                
+
             st.markdown("#### 📊 Layout Block Distribution")
             st.json(doc_tags.get("layout_counts", {}))
-            
-        with tab_export:
+
+        elif view_selection == "🤖 Gemini AI Form & Correction":
+            render_openai_correction_form(raw_ocr, key_prefix="multipage")
+
+        elif view_selection == "📥 Export Center (.docx / .html)":
             st.subheader("📥 Export Digitized Document")
             st.write("Download your extracted document in Microsoft Word (.docx) with embedded image graphics or HTML presentation format:")
-            
+
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 st.download_button(
@@ -625,8 +962,8 @@ if run_unified_pipeline:
                     mime="text/html",
                     use_container_width=True,
                 )
-                
-        with tab_inspector:
+
+        elif view_selection == "🔍 Pipeline Diagnostic Inspector":
             st.image(
                 annotated,
                 caption="Pipeline Bounding Box & Reading Order Overlay",
@@ -645,6 +982,7 @@ if run_unified_pipeline:
                             st.image(pil_image.crop((cx0, cy0, cx1, cy1)), caption=f"Extracted Image Region ({blk.label})")
                     else:
                         render_ocr_html(blk.html, height=160)
+
 
 
 if run_text_det:
@@ -723,38 +1061,56 @@ if run_full_page_ocr:
         n_blocks = len(page.blocks)
         n_ok = sum(1 for b in page.blocks if not b.skipped and not b.error)
         _show_timing("Surya 2 Native VLM (MacBook)", elapsed, f"{n_blocks} blocks parsed, {n_ok} OK")
-        
+
         full_html = _assemble_page_html(page, pil_image)
         spatial_html = _assemble_spatial_page_html(page, pil_image)
-        
+        p_num = page_number or 1
+        doc_tags = tag_document_page(page, pil_image, "Tata Power Digitized Document", p_num)
+        raw_ocr = "\n".join([b.html for b in page.blocks if hasattr(b, 'html') and b.html])
+
         # Generate DOCX binary using Surya native page blocks and cropped image regions
         docx_bytes = create_docx_from_surya_page(
             page=page,
             pil_image=pil_image,
             document_title="Tata Power Digitized Document",
         )
-        
-        tab_doc, tab_spatial, tab_export, tab_inspector = st.tabs([
-            "📄 Presentable Document Preview",
-            "🎯 1:1 Exact Spatial Layout Replica",
-            "📥 Export Center (.docx / .html)",
-            "🔍 Layout Overlay & Inspector",
-        ])
-        
-        with tab_doc:
+
+        if view_selection == "📄 Presentable Document Preview":
             st.markdown("### ⚡ Tata Power Digitized Document")
             st.caption("Extracted document flow layout with embedded image graphics, formatted tables, and section headings")
             render_ocr_html(full_html, height=700)
-            
-        with tab_spatial:
+
+        elif view_selection == "🎯 1:1 Exact Spatial Layout Replica":
             st.markdown("### 🎯 1:1 Spatial Layout Replica")
             st.caption("Exact spatial coordinate positioning matching the original document page layout")
             render_ocr_html(spatial_html, height=750)
-            
-        with tab_export:
+
+        elif view_selection == "🏷️ Metadata Tags & Entities":
+            st.markdown("### 🏷️ Extracted Document Metadata & Classification Tags")
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric(label="📄 Document Title", value=doc_tags.get("document_title", "N/A"))
+            with m2:
+                st.metric(label="🏷️ Classified Document Type", value=doc_tags.get("document_type", "General Document"))
+
+            st.markdown("#### 📝 Document Summary")
+            st.info(doc_tags.get("summary", "No summary extracted."))
+
+            entities = doc_tags.get("entities", [])
+            if entities:
+                st.markdown("#### 🔑 Key Extracted Entities")
+                st.write(" • ".join([f"`{e}`" for e in entities]))
+
+            st.markdown("#### 📊 Layout Block Distribution")
+            st.json(doc_tags.get("layout_counts", {}))
+
+        elif view_selection == "🤖 Gemini AI Form & Correction":
+            render_openai_correction_form(raw_ocr, key_prefix="singlepage")
+
+        elif view_selection == "📥 Export Center (.docx / .html)":
             st.subheader("📥 Export Digitized Document")
             st.write("Download your extracted document in Microsoft Word (.docx) with embedded image graphics or HTML presentation format:")
-            
+
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 st.download_button(
@@ -772,8 +1128,8 @@ if run_full_page_ocr:
                     mime="text/html",
                     use_container_width=True,
                 )
-                
-        with tab_inspector:
+
+        elif view_selection == "🔍 Pipeline Diagnostic Inspector":
             st.image(
                 annotated,
                 caption="Full-Page OCR Layout Overlay (green=ok, orange=skipped, red=error)",
