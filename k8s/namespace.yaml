@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-ocr
+    app.kubernetes.io/part-of: surya-platform

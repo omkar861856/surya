@@ -7,7 +7,7 @@ from surya.common.polygon import PolygonBox
 
 class LayoutBox(PolygonBox):
     label: str  # canonicalized via LAYOUT_PRED_RELABEL
-    raw_label: str  # original model label, before canonicalization
+    raw_label: str = ""  # original model label, before canonicalization
     position: int  # reading order index
     count: int = 0  # model's token estimate for OCR output (multiple of 50)
 

@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: surya-frontend
+  namespace: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-frontend
+    app.kubernetes.io/part-of: surya-platform
+    app.kubernetes.io/component: web-ui
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: surya-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: surya-frontend
+        app.kubernetes.io/part-of: surya-platform
+        app.kubernetes.io/component: web-ui
+    spec:
+      affinity:
+        # Distribute pods across different nodes for high availability
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - surya-frontend
+                topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: streamlit-app
+          image: suryaocr:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-streamlit
+              containerPort: 8501
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: surya-config
+            - secretRef:
+                name: surya-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1.5Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          # Automated Health Probes to eliminate 502 Bad Gateway
+          startupProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+              readOnly: true
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: surya-model-cache-pvc

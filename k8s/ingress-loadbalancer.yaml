@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: surya-ingress
+  namespace: surya-ocr
+  annotations:
+    # Essential for Cloud Load Balancers & Ingress Controllers
+    kubernetes.io/ingress.class: "nginx"
+    
+    # CRITICAL: Streamlit WebSockets require Cookie-based Session Affinity (Sticky Sessions)
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "SURYA_SESSION_AFFINITY"
+    nginx.ingress.kubernetes.io/session-cookie-expires: "172800"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "172800"
+    nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
+    
+    # WebSocket and long-running OCR task proxy timeouts (prevents 502/504 Bad Gateway)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/websocket-services: "surya-frontend-svc"
+    
+    # SSL / TLS automated certificates
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ocr.omkar.solutions
+      secretName: surya-tls-cert
+  rules:
+    - host: ocr.omkar.solutions
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: surya-frontend-svc
+                port:
+                  number: 8501

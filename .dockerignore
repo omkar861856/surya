@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+tests
+output
+*.numbers
+*.md
+!README.md
+.pre-commit-config.yaml
+uv.lock
+.env
+local.env

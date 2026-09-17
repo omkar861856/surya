@@ -80,11 +80,11 @@ class Settings(BaseSettings):
     # produces well-formed JSON without the schema.
     SURYA_GUIDED_TABLE_REC: bool = False
 
-    # Token budgets
+    # Token budgets (optimized to prevent runaway generation loops)
     SURYA_MAX_TOKENS_LAYOUT: int = 3072
     SURYA_MAX_TOKENS_TABLE_REC: int = 3072
-    SURYA_MAX_TOKENS_BLOCK_CEILING: int = 8192
-    SURYA_MAX_TOKENS_FULL_PAGE: int = 12288
+    SURYA_MAX_TOKENS_BLOCK_CEILING: int = 1536
+    SURYA_MAX_TOKENS_FULL_PAGE: int = 4096
 
     # Full-page OCR: progressive-temperature regeneration before block-mode fallback.
     # Off by default (single greedy pass -> block fallback); opt-in for benchmarking.

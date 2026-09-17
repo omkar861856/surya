@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: surya-model-cache-pvc
+  namespace: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-ocr
+    backup.kubernetes.io/cdp-enabled: "true" # Triggers cloud CDP backup snapshot policy
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: surya-data-pvc
+  namespace: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-ocr
+    backup.kubernetes.io/cdp-enabled: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

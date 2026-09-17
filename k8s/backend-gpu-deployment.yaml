@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: surya-backend-gpu
+  namespace: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-backend-gpu
+    app.kubernetes.io/part-of: surya-platform
+    app.kubernetes.io/component: inference-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: surya-backend-gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: surya-backend-gpu
+        app.kubernetes.io/part-of: surya-platform
+        app.kubernetes.io/component: inference-engine
+    spec:
+      # Directs this pod to nodes equipped with NVIDIA GPUs
+      nodeSelector:
+        accelerator: nvidia-gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggerganov/llama.cpp:server-cuda
+          args:
+            - "-m"
+            - "/models/hub/models--datalab-to--surya-ocr-2-gguf/snapshots/6a3a4c30e5e74446d4f8b6afd05b2f2da970f470/surya-2.gguf"
+            - "--mmproj"
+            - "/models/hub/models--datalab-to--surya-ocr-2-gguf/snapshots/6a3a4c30e5e74446d4f8b6afd05b2f2da970f470/surya-2-mmproj.gguf"
+            - "-ngl"
+            - "99"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            - "--parallel"
+            - "4"
+            - "--ctx-size"
+            - "32768"
+            - "--flash-attn"
+            - "on"
+            - "--alias"
+            - "datalab-to/surya-ocr-2"
+            - "--jinja"
+          ports:
+            - name: http-inference
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "6Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4000m"
+              memory: "12Gi"
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: surya-model-cache-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: surya-backend-gpu
+  namespace: surya-ocr
+  labels:
+    app.kubernetes.io/name: surya-backend-gpu
+    app.kubernetes.io/component: inference-engine
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: surya-backend-gpu
